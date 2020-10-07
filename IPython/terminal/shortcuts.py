@@ -19,6 +19,9 @@ from prompt_toolkit.filters import (has_focus, has_selection, Condition,
     vi_insert_mode, emacs_insert_mode, has_completions, vi_mode)
 from prompt_toolkit.key_binding.bindings.completion import display_completions_like_readline
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.key_binding.key_processor import KeyPress
+from prompt_toolkit.keys import Keys
+from prompt_toolkit.key_binding.bindings import named_commands as nc
 
 from IPython.utils.decorators import undoc
 
@@ -206,6 +209,154 @@ def create_ipython_shortcuts(shell):
 
     if sys.platform == 'win32':
         kb.add('c-v', filter=(has_focus(DEFAULT_BUFFER) & ~vi_mode))(win_paste)
+
+    def is_callable(text=""):
+        completions = Interpreter(text, [locals()]).complete()
+        match = next((i for i in completions if i.name == text), None)
+        return match.type in ("class", "function") if match else None
+
+    @Condition
+    def tac():
+        return shell.tab_apply_completion
+
+    insert_mode = vi_insert_mode | emacs_insert_mode
+    focused_insert =  insert_mode & has_focus(DEFAULT_BUFFER)
+    shown_not_selected = has_selection & ~completion_is_selected
+    alt_enter = [KeyPress(Keys.Escape), KeyPress(Keys.Enter)]
+
+    # apply selected completion
+    @kb.add('c-j', filter=focused_insert & completion_is_selected & tac)
+    @kb.add("enter", filter=focused_insert & completion_is_selected & tac)
+    def _(event):
+        b = event.current_buffer
+        text = b.text
+        completion = b.complete_state.current_completion
+        if is_callable(completion.text):
+            b.insert_text("()")
+            b.cursor_left()
+        if text == b.text:
+            event.cli.key_processor.feed_multiple(alt_enter)
+
+    # apply first completion option when completion menu is showing
+    @kb.add('c-j', filter=focused_insert & shown_not_selected & tac)
+    @kb.add("enter", filter=focused_insert & shown_not_selected & tac)
+    def _(event):
+        b = event.current_buffer
+        text = b.text
+        b.complete_next()
+        completion = b.complete_state.current_completion
+        b.apply_completion(completion)
+        if is_callable(completion.text):
+            b.insert_text("()")
+            b.cursor_left()
+        if text == b.text:
+            event.cli.key_processor.feed_multiple(alt_enter)
+
+    # apply completion if there is only one option, otherwise start completion
+    @kb.add("tab", filter=focused_insert & ~has_completions & tac)
+    @kb.add("c-space", filter=focused_insert & ~has_completions & tac)
+    def _(event):
+        b = event.current_buffer
+        complete_event = CompleteEvent(completion_requested=True)
+        completions = list(b.completer.get_completions(b.document, complete_event))
+        if len(completions) == 1:
+            completion = completions[0]
+            b.apply_completion(completion)
+            if is_callable(completion.text):
+                b.insert_text("()")
+                b.cursor_left()
+        else:
+            b.start_completion(insert_common_part=True)
+
+    # apply first completion option if completion menu is showing
+    @kb.add("tab", filter=focused_insert & shown_not_selected & tac)
+    @kb.add("c-space", filter=focused_insert & shown_not_selected & tac)
+    def _(event):
+        b = event.current_buffer
+        b.complete_next()
+        completion = b.complete_state.current_completion
+        b.apply_completion(completion)
+        if is_callable(completion.text):
+            b.insert_text("()")
+            b.cursor_left()
+
+    # apply selected completion option
+    @kb.add("tab", filter=focused_insert & completion_is_selected  & tac)
+    @kb.add("c-space", filter=focused_insert & completion_is_selected & tac)
+    def _(event):
+        b = event.current_buffer
+        completion = b.complete_state.current_completion
+        b.apply_completion(completion)
+        if is_callable(completion.text):
+            b.insert_text("()")
+            b.cursor_left()
+
+    @Condition
+    def ebivim():
+        return shell.emacs_bindings_in_vi_insert_mode
+
+    focused_insert = has_focus(DEFAULT_BUFFER) & vi_insert_mode
+
+    # Needed for to accept autosuggestions in vi insert mode
+    @kb.add("c-e", filter=focused_insert & ebivim)
+    def _(event):
+        b = event.current_buffer
+        suggestion = b.suggestion
+        if suggestion:
+            b.insert_text(suggestion.text)
+        else:
+            nc.end_of_line(event)
+
+    @kb.add("c-f", filter=focused_insert & ebivim)
+    def _(event):
+        b = event.current_buffer
+        suggestion = b.suggestion
+        if suggestion:
+            b.insert_text(suggestion.text)
+        else:
+            nc.forward_char(event)
+
+    @kb.add("escape", "f", filter=focused_insert & ebivim)
+    def _(event):
+        b = event.current_buffer
+        suggestion = b.suggestion
+        if suggestion:
+            t = re.split(r"(\S+\s+)", suggestion.text)
+            b.insert_text(next((x for x in t if x), ""))
+        else:
+            nc.forward_word(event)
+
+    # Simple Control keybindings
+    key_cmd_dict = {
+        "c-a": nc.beginning_of_line,
+        "c-b": nc.backward_char,
+        "c-k": nc.kill_line,
+        "c-w": nc.backward_kill_word,
+        "c-y": nc.yank,
+        "c-_": nc.undo,
+    }
+
+    for key, cmd in key_cmd_dict.items():
+        kb.add(key, filter=focused_insert & ebivim)(cmd)
+
+    # Alt and Combo Control keybindings
+    keys_cmd_dict = {
+        # Control Combos
+        ("c-x", "c-e"): nc.edit_and_execute,
+        ("c-x", "e"): nc.edit_and_execute,
+        # Alt
+        ("escape", "b"): nc.backward_word,
+        ("escape", "c"): nc.capitalize_word,
+        ("escape", "d"): nc.kill_word,
+        ("escape", "h"): nc.backward_kill_word,
+        ("escape", "l"): nc.downcase_word,
+        ("escape", "u"): nc.uppercase_word,
+        ("escape", "y"): nc.yank_pop,
+        ("escape", "."): nc.yank_last_arg,
+    }
+
+    for keys, cmd in keys_cmd_dict.items():
+        kb.add(*keys, filter=focused_insert & ebivim)(cmd)
 
     return kb
 
